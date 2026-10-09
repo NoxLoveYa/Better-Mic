@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "./store";
 import { AddFilter } from "./components/AddFilter";
 import { FilterCard } from "./components/FilterCard";
+import { Icon } from "./components/Icon";
 import { Meters } from "./components/Meters";
 import { NvidiaPrompt } from "./components/NvidiaPrompt";
 import { PresetMenu } from "./components/PresetMenu";
+import { Select } from "./components/Select";
 import { TitleBar } from "./components/TitleBar";
 import { Toast } from "./components/Toast";
 
@@ -26,6 +28,14 @@ export default function App() {
     <>
       <TitleBar />
       <NvidiaPrompt />
+      <div className="toolbar">
+        <PresetMenu />
+        <span className="spacer" />
+        <button className="ghost" onClick={() => s.setAllCollapsed(!allFolded)}>
+          {allFolded ? "Expand all" : "Collapse all"}
+        </button>
+        <AddFilter />
+      </div>
       <div className="scroll">
         <div className="app">
           {s.error && (
@@ -48,37 +58,29 @@ export default function App() {
           <section className="panel devices">
             <label>
               <span className="label">Microphone</span>
-              <select disabled={s.running} value={s.input ?? ""} onChange={(e) => s.setInput(e.target.value)}>
-                {s.devices?.inputs.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
+              <Select
+                disabled={s.running}
+                value={s.input ?? ""}
+                options={(s.devices?.inputs ?? []).map((d) => ({ value: d.id, label: d.name }))}
+                onChange={s.setInput}
+                placeholder={s.devices ? "No microphone found" : "Loading…"}
+              />
             </label>
             <label>
               <span className="label">Output (virtual cable)</span>
-              <select disabled={s.running} value={s.output ?? ""} onChange={(e) => s.setOutput(e.target.value)}>
-                {s.devices?.outputs.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
+              <Select
+                disabled={s.running}
+                value={s.output ?? ""}
+                options={(s.devices?.outputs ?? []).map((d) => ({ value: d.id, label: d.name }))}
+                onChange={s.setOutput}
+                placeholder={s.devices ? "No output device found" : "Loading…"}
+              />
             </label>
-            <button onClick={() => s.refreshDevices()} disabled={s.running}>
-              Refresh
+            <button onClick={() => s.refreshDevices()} disabled={s.running} title="Rescan audio devices" aria-label="Refresh devices">
+              <Icon name="reset" />
+              <span className="btn-text">Refresh</span>
             </button>
           </section>
-
-          <div className="toolbar">
-            <PresetMenu />
-            <span className="spacer" />
-            <button className="ghost" onClick={() => s.setAllCollapsed(!allFolded)}>
-              {allFolded ? "Expand all" : "Collapse all"}
-            </button>
-            <AddFilter />
-          </div>
 
           <span className="label chain-label">Signal chain · applied top to bottom</span>
 

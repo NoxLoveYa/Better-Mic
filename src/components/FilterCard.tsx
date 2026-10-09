@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import { useStore } from "../store";
 import { FILTERS, isSelect, type FilterCfg } from "../filters/schema";
 import { Icon } from "./Icon";
+import { Select } from "./Select";
 
 interface Props {
   filter: FilterCfg;
@@ -61,13 +62,11 @@ export function FilterCard({ filter, index, count, onDragStart, onDrop }: Props)
                 return (
                   <label key={p.key}>
                     {p.label}
-                    <select value={String(value)} onChange={(e) => setParam(filter.id, p.key, e.target.value)}>
-                      {p.options.map((o) => (
-                        <option key={o.value} value={o.value} disabled={o.value === "nvidia" && nvidia?.available === false}>
-                          {o.label}
-                        </option>
-                      ))}
-                    </select>
+                    <Select
+                      value={String(value)}
+                      options={p.options.map((o) => ({ ...o, disabled: o.value === "nvidia" && nvidia?.available === false }))}
+                      onChange={(v) => setParam(filter.id, p.key, v)}
+                    />
                     {filter.kind === "denoise" && nvidia && (!nvidia.available || value === "nvidia") && (
                       <small>
                         {nvidia.detail}
