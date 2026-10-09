@@ -2,6 +2,7 @@
 //! cpal streams are `!Send`, so everything lives on one dedicated thread; the audio callbacks only
 //! move samples through lock-free ring buffers.
 
+use super::exclusive;
 use super::resample::Resampler;
 use super::{default_output_id, find_device};
 use crate::dsp::{lin_to_db, Chain, FilterCfg, FRAME, SR};
@@ -57,12 +58,24 @@ struct MeterPayload {
     out_peak: f32,
     out_rms: f32,
     buffered_ms: f32,
+    exclusive: bool,
+}
+
+enum Out {
+    Shared(Stream),
+    Exclusive(exclusive::Stream),
+}
+
+/// Exclusive mode locks every other app out of the device, so only ever use it on a virtual cable.
+fn is_virtual(dev: &Device) -> bool {
+    let name = dev.description().map(|d| d.name().to_lowercase()).unwrap_or_default();
+    ["cable", "virtual", "vb-audio", "voicemeeter"].iter().any(|k| name.contains(k))
 }
 
 /// An output device fed with 48 kHz frames. Resamples to the device rate and trims the rate slightly
 /// to hold the buffer at its target fill despite clock drift.
 struct Sink {
-    stream: Stream,
+    out: Out,
     prod: Producer<f32>,
     cap: usize,
     rate: u32,
@@ -74,19 +87,33 @@ struct Sink {
 }
 
 impl Sink {
-    fn open(app: &AppHandle, id: Option<&str>, err_event: &'static str) -> Result<Self, String> {
+    /// With `exclusive`, a virtual cable is opened in WASAPI exclusive mode so screen-share audio capture can't hear
+    /// it; if that isn't possible (another app has the cable open) it falls back to the shared mixer.
+    fn open(app: &AppHandle, id: Option<&str>, err_event: &'static str, exclusive: bool) -> Result<Self, String> {
         let dev = find_device(id, false)?;
+        let dev_id = dev.id().ok().map(|i| i.to_string());
+        let excl = match dev_id.as_deref() {
+            Some(d) if exclusive && is_virtual(&dev) => exclusive::negotiate(d)
+                .map_err(|e| eprintln!("exclusive output unavailable, using shared mode: {e}"))
+                .ok(),
+            _ => None,
+        };
         let sup = dev.default_output_config().map_err(|e| e.to_string())?;
-        let rate = sup.sample_rate();
+        let rate = excl.as_ref().map_or(sup.sample_rate(), |n| n.rate);
         let cap = rate as usize / 2;
         let (mut prod, cons) = RingBuffer::<f32>::new(cap);
-        let err = err_cb(app, err_event);
-        let stream = match sup.sample_format() {
-            SampleFormat::F32 => build_output::<f32>(&dev, sup.clone().into(), cons, err),
-            SampleFormat::I16 => build_output::<i16>(&dev, sup.clone().into(), cons, err),
-            SampleFormat::I32 => build_output::<i32>(&dev, sup.clone().into(), cons, err),
-            f => Err(format!("unsupported output sample format {f}")),
-        }?;
+        let out = match excl {
+            Some(n) => Out::Exclusive(exclusive::Stream::new(n, cons, err_msg(app, err_event))),
+            None => {
+                let err = err_cb(app, err_event);
+                Out::Shared(match sup.sample_format() {
+                    SampleFormat::F32 => build_output::<f32>(&dev, sup.clone().into(), cons, err),
+                    SampleFormat::I16 => build_output::<i16>(&dev, sup.clone().into(), cons, err),
+                    SampleFormat::I32 => build_output::<i32>(&dev, sup.clone().into(), cons, err),
+                    f => Err(format!("unsupported output sample format {f}")),
+                }?)
+            }
+        };
 
         let target_fill = rate as f32 * TARGET_BUFFER_MS / 1000.0;
         // Pre-fill with silence so the output callback doesn't underrun while the first frames are processed.
@@ -95,12 +122,21 @@ impl Sink {
         }
         let rs = Resampler::new(SR as f64, rate as f64);
         let base_step = rs.step;
-        let id = dev.id().ok().map(|i| i.to_string());
-        Ok(Self { stream, prod, cap, rate, rs, base_step, target_fill, fill_avg: target_fill, id })
+        Ok(Self { out, prod, cap, rate, rs, base_step, target_fill, fill_avg: target_fill, id: dev_id })
     }
 
-    fn play(&self) -> Result<(), String> {
-        self.stream.play().map_err(|e| e.to_string())
+    fn exclusive(&self) -> bool {
+        matches!(self.out, Out::Exclusive(_))
+    }
+
+    fn play(&mut self) -> Result<(), String> {
+        match &mut self.out {
+            Out::Shared(s) => s.play().map_err(|e| e.to_string()),
+            Out::Exclusive(s) => {
+                s.play();
+                Ok(())
+            }
+        }
     }
 
     fn push(&mut self, frame: &[f32]) {
@@ -162,7 +198,7 @@ fn build(app: &AppHandle, input: Option<&str>, output: Option<&str>) -> Result<I
         SampleFormat::I32 => build_input::<i32>(&in_dev, in_sup.clone().into(), in_prod, wake, err_in),
         f => Err(format!("unsupported input sample format {f}")),
     }?;
-    let out = Sink::open(app, output, "engine-error")?;
+    let mut out = Sink::open(app, output, "engine-error", true)?;
 
     out.play()?;
     input_stream.play().map_err(|e| e.to_string())?;
@@ -174,7 +210,7 @@ fn open_preview(app: &AppHandle, cable_id: Option<&str>) -> Result<Sink, String>
     if default.is_some() && default.as_deref() == cable_id {
         return Err("The Windows default output is the virtual cable itself. Set your speakers or headphones as the default output to preview.".into());
     }
-    let sink = Sink::open(app, None, "preview-error")?;
+    let mut sink = Sink::open(app, None, "preview-error", false)?;
     sink.play()?;
     Ok(sink)
 }
@@ -186,6 +222,13 @@ fn err_cb(app: &AppHandle, event: &'static str) -> impl FnMut(cpal::Error) + Sen
         if e.kind() != cpal::ErrorKind::Xrun {
             let _ = app.emit(event, e.to_string());
         }
+    }
+}
+
+fn err_msg(app: &AppHandle, event: &'static str) -> impl FnMut(String) + Send + 'static {
+    let app = app.clone();
+    move |m| {
+        let _ = app.emit(event, m);
     }
 }
 
@@ -326,7 +369,8 @@ fn run(app: AppHandle, mut io: Io, cfg: Vec<FilterCfg>, rx: mpsc::Receiver<Msg>,
             let (in_peak, in_rms) = lin.take();
             let (out_peak, out_rms) = lout.take();
             let buffered_ms = io.out.buffered_ms();
-            let _ = app.emit("meter", MeterPayload { in_peak, in_rms, out_peak, out_rms, buffered_ms });
+            let exclusive = io.out.exclusive();
+            let _ = app.emit("meter", MeterPayload { in_peak, in_rms, out_peak, out_rms, buffered_ms, exclusive });
         }
 
         thread::park_timeout(Duration::from_millis(5));

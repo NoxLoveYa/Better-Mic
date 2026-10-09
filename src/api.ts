@@ -20,6 +20,7 @@ export interface Meter {
   out_peak: number;
   out_rms: number;
   buffered_ms: number;
+  exclusive: boolean;
 }
 
 export interface NvidiaStatus {

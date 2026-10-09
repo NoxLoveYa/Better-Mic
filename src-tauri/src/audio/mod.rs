@@ -1,4 +1,5 @@
 pub mod engine;
+mod exclusive;
 mod resample;
 
 use cpal::traits::{DeviceTrait, HostTrait};

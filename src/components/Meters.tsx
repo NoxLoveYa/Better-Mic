@@ -24,7 +24,17 @@ export function Meters() {
     <section className="panel meters">
       <div className="meters-head">
         <span className="label">Levels</span>
-        {m && <small>{m.buffered_ms.toFixed(0)} ms buffered</small>}
+        {m && (
+          <small
+            title={
+              m.exclusive
+                ? "The cable is opened in exclusive mode, so Discord's screen-share audio can't pick up your voice a second time."
+                : "The cable is on the shared mixer, so a whole-screen share can pick up your voice twice. Close any other app using the cable, then Stop and Start."
+            }
+          >
+            {m.buffered_ms.toFixed(0)} ms buffered · {m.exclusive ? "exclusive" : "shared"} cable
+          </small>
+        )}
       </div>
       <Bar label="In" peak={m?.in_peak ?? -120} rms={m?.in_rms ?? -120} />
       <Bar label="Out" peak={m?.out_peak ?? -120} rms={m?.out_rms ?? -120} />
