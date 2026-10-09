@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "../store";
+import { Popover } from "./Popover";
 
 const win = getCurrentWindow();
 
@@ -25,42 +26,32 @@ function Setting({ title, hint, on, onToggle }: { title: string; hint: string; o
 function Settings() {
   const { autostart, closeToTray, setAutostart, setCloseToTray } = useStore();
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const away = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    document.addEventListener("mousedown", away);
-    document.addEventListener("keydown", esc);
-    return () => {
-      document.removeEventListener("mousedown", away);
-      document.removeEventListener("keydown", esc);
-    };
-  }, [open]);
 
   return (
-    <div className="settings" ref={ref}>
-      <button className={open ? "toggled" : ""} aria-expanded={open} onClick={() => setOpen(!open)}>
-        Settings
-      </button>
-      {open && (
-        <div className="menu">
-          <Setting
-            title="Launch on Windows startup"
-            hint="Starts in the tray and begins processing automatically."
-            on={autostart}
-            onToggle={() => setAutostart(!autostart)}
-          />
-          <Setting
-            title="Minimize to tray when closed"
-            hint="Closing the window keeps the mic running. Quit from the tray icon."
-            on={closeToTray}
-            onToggle={() => setCloseToTray(!closeToTray)}
-          />
-        </div>
-      )}
-    </div>
+    <Popover
+      open={open}
+      onClose={() => setOpen(false)}
+      align="right"
+      className="w320"
+      anchor={
+        <button className={open ? "toggled" : ""} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>
+          Settings
+        </button>
+      }
+    >
+      <Setting
+        title="Launch on Windows startup"
+        hint="Starts in the tray and begins processing automatically."
+        on={autostart}
+        onToggle={() => setAutostart(!autostart)}
+      />
+      <Setting
+        title="Minimize to tray when closed"
+        hint="Closing the window keeps the mic running. Quit from the tray icon."
+        on={closeToTray}
+        onToggle={() => setCloseToTray(!closeToTray)}
+      />
+    </Popover>
   );
 }
 

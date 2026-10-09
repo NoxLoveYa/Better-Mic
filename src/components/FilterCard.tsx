@@ -1,6 +1,7 @@
 import type { CSSProperties } from "react";
 import { useStore } from "../store";
 import { FILTERS, isSelect, type FilterCfg } from "../filters/schema";
+import { Icon } from "./Icon";
 
 interface Props {
   filter: FilterCfg;
@@ -11,8 +12,10 @@ interface Props {
 }
 
 export function FilterCard({ filter, index, count, onDragStart, onDrop }: Props) {
-  const { toggleFilter, removeFilter, moveFilter, setParam, nvidia, gpu, openNvidiaPrompt } = useStore();
+  const { toggleFilter, removeFilter, moveFilter, setParam, nvidia, gpu, openNvidiaPrompt, collapsed, toggleCollapsed } =
+    useStore();
   const def = FILTERS[filter.kind];
+  const folded = !!collapsed[filter.id];
 
   return (
     <li className={`step${filter.enabled ? " on" : ""}`} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
@@ -22,16 +25,21 @@ export function FilterCard({ filter, index, count, onDragStart, onDrop }: Props)
       <div className="card">
         <div className="card-head">
           <span className="grip" title="Drag to reorder" draggable onDragStart={onDragStart}>
-            ⋮⋮
+            <Icon name="grip" />
           </span>
-          <h3>{def.label}</h3>
+          <h3 className={`card-title${folded ? " folded" : ""}`}>
+            <button aria-expanded={!folded} title={folded ? "Expand" : "Collapse"} onClick={() => toggleCollapsed(filter.id)}>
+              <Icon name="chevron" />
+              {def.label}
+            </button>
+          </h3>
           {!filter.enabled && <span className="tag">Bypassed</span>}
           <span className="fill" />
-          <button className="ghost" disabled={index === 0} onClick={() => moveFilter(index, index - 1)} title="Apply earlier">
-            ↑
+          <button className="ghost icon" disabled={index === 0} onClick={() => moveFilter(index, index - 1)} title="Apply earlier" aria-label="Move up">
+            <Icon name="up" />
           </button>
-          <button className="ghost" disabled={index === count - 1} onClick={() => moveFilter(index, index + 1)} title="Apply later">
-            ↓
+          <button className="ghost icon" disabled={index === count - 1} onClick={() => moveFilter(index, index + 1)} title="Apply later" aria-label="Move down">
+            <Icon name="down" />
           </button>
           <button
             role="switch"
@@ -41,11 +49,11 @@ export function FilterCard({ filter, index, count, onDragStart, onDrop }: Props)
             title={filter.enabled ? "Bypass" : "Enable"}
             onClick={() => toggleFilter(filter.id)}
           />
-          <button className="ghost" onClick={() => removeFilter(filter.id)} title="Remove">
-            ✕
+          <button className="ghost icon" onClick={() => removeFilter(filter.id)} title="Remove" aria-label="Remove">
+            <Icon name="close" />
           </button>
         </div>
-        {def.params.length > 0 && (
+        {def.params.length > 0 && !folded && (
           <div className="params">
             {def.params.map((p) => {
               const value = filter.params[p.key] ?? p.def;

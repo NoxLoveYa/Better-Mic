@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { api, type Devices, type Meter, type NvidiaGpu, type NvidiaInstallProgress, type NvidiaStatus } from "./api";
-import { defaultChain, makeFilter, type FilterCfg, type FilterKind, type ParamValue } from "./filters/schema";
+import { FILTERS, defaultChain, makeFilter, type FilterCfg, type FilterKind, type ParamValue } from "./filters/schema";
+import { normalizeChain, signature } from "./filters/chain";
 
 const STORAGE_KEY = "better-mic";
 
@@ -13,6 +14,16 @@ interface Saved {
   autostartDefaulted: boolean;
   /** Set once the NVIDIA install popup was closed, so it doesn't reappear on every launch. */
   nvidiaPromptDismissed: boolean;
+  /** The preset the chain was last loaded from or saved as, and what it looked like then (see `signature`). */
+  activePreset: string | null;
+  presetBaseline: string | null;
+}
+
+/** What "Undo" restores after loading a preset or resetting. */
+interface Snapshot {
+  chain: FilterCfg[];
+  activePreset: string | null;
+  presetBaseline: string | null;
 }
 
 const loadSaved = (): Saved => {
@@ -23,6 +34,8 @@ const loadSaved = (): Saved => {
     closeToTray: false,
     autostartDefaulted: false,
     nvidiaPromptDismissed: false,
+    activePreset: null,
+    presetBaseline: null,
   };
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "");
@@ -42,6 +55,10 @@ interface State extends Saved {
   meter: Meter | null;
   error: string | null;
   notice: string | null;
+  /** Bumped on every toast so repeating the same message restarts its timer. */
+  noticeSeq: number;
+  undo: Snapshot | null;
+  collapsed: Record<string, boolean>;
   installingCable: boolean;
   presets: string[];
   nvidia: NvidiaStatus | null;
@@ -64,25 +81,32 @@ interface State extends Saved {
   setAutostart: (on: boolean) => Promise<void>;
   setCloseToTray: (on: boolean) => void;
   dismissError: () => void;
+  dismissNotice: () => void;
+  undoChain: () => void;
 
   addFilter: (kind: FilterKind) => void;
   removeFilter: (id: string) => void;
   moveFilter: (from: number, to: number) => void;
   toggleFilter: (id: string) => void;
   setParam: (id: string, key: string, value: ParamValue) => void;
+  toggleCollapsed: (id: string) => void;
+  setAllCollapsed: (on: boolean) => void;
 
   refreshPresets: () => Promise<void>;
+  /** Saves the current chain under `name` (replacing any preset with that name) and makes it the active preset. */
   savePreset: (name: string) => Promise<void>;
+  saveActivePreset: () => Promise<void>;
   loadPreset: (name: string) => Promise<void>;
   deletePreset: (name: string) => Promise<void>;
+  resetChain: () => void;
 }
 
 export const useStore = create<State>((set, get) => {
   const persist = () => {
-    const { input, output, chain, closeToTray, autostartDefaulted, nvidiaPromptDismissed } = get();
+    const { input, output, chain, closeToTray, autostartDefaulted, nvidiaPromptDismissed, activePreset, presetBaseline } = get();
     localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ input, output, chain, closeToTray, autostartDefaulted, nvidiaPromptDismissed }),
+      JSON.stringify({ input, output, chain, closeToTray, autostartDefaulted, nvidiaPromptDismissed, activePreset, presetBaseline }),
     );
   };
 
@@ -94,6 +118,20 @@ export const useStore = create<State>((set, get) => {
 
   const fail = (e: unknown) => set({ error: String(e) });
 
+  /** Shows a toast, optionally with an Undo that restores `undo`. */
+  const say = (notice: string, undo: Snapshot | null = null) => set((s) => ({ notice, undo, noticeSeq: s.noticeSeq + 1 }));
+
+  const snapshot = (): Snapshot => {
+    const { chain, activePreset, presetBaseline } = get();
+    return { chain, activePreset, presetBaseline };
+  };
+
+  /** Swaps in a whole chain (preset load, reset, undo) and records which preset it came from. */
+  const replaceChain = (chain: FilterCfg[], activePreset: string | null, presetBaseline: string | null) => {
+    set({ activePreset, presetBaseline });
+    setChain(chain);
+  };
+
   return {
     ...loadSaved(),
     autostart: false,
@@ -104,6 +142,9 @@ export const useStore = create<State>((set, get) => {
     meter: null,
     error: null,
     notice: null,
+    noticeSeq: 0,
+    undo: null,
+    collapsed: {},
     installingCable: false,
     presets: [],
     nvidia: null,
@@ -128,11 +169,9 @@ export const useStore = create<State>((set, get) => {
         set({
           nvidia,
           nvidiaPrompt: !nvidia.available,
-          notice: nvidia.available
-            ? "NVIDIA noise removal installed. Pick it under Noise suppression → Method."
-            : null,
           nvidiaError: nvidia.available ? null : "The installer finished, but the SDK still isn't found. Restart Better Mic and check again.",
         });
+        if (nvidia.available) say("NVIDIA noise removal installed. Pick it under Noise suppression → Method.");
       } catch (e) {
         set({ nvidiaError: String(e) });
       } finally {
@@ -146,11 +185,11 @@ export const useStore = create<State>((set, get) => {
         await api.installVbCable();
         await get().refreshDevices();
         const found = get().devices?.outputs.some((d) => /CABLE Input/i.test(d.name));
-        set({
-          notice: found
+        say(
+          found
             ? "VB-Cable installed. In your apps, choose “CABLE Output” as the microphone."
             : "Installer finished. If CABLE doesn't show up, restart Windows and press Refresh.",
-        });
+        );
       } catch (e) {
         fail(e);
       } finally {
@@ -177,6 +216,21 @@ export const useStore = create<State>((set, get) => {
       ]).catch(fail);
       const { gpu, nvidia, nvidiaPromptDismissed } = get();
       if (gpu && nvidia && !nvidia.available && !nvidiaPromptDismissed) set({ nvidiaPrompt: true });
+
+      // Work out which saved preset (if any) the restored chain still matches, so the toolbar shows the right name.
+      const { presets } = get();
+      if (get().activePreset && !presets.includes(get().activePreset!)) set({ activePreset: null, presetBaseline: null });
+      if (!get().activePreset) {
+        const sig = signature(get().chain);
+        for (const name of presets) {
+          const saved = await api.loadPreset(name).then(normalizeChain).catch(() => null);
+          if (saved && signature(saved) === sig) {
+            set({ activePreset: name, presetBaseline: sig });
+            break;
+          }
+        }
+      }
+      persist();
 
       // Re-check when returning to the window, so installing the NVIDIA SDK doesn't need an app restart.
       window.addEventListener("focus", () => api.nvidiaStatus().then((nvidia) => set({ nvidia })).catch(() => {}));
@@ -271,10 +325,26 @@ export const useStore = create<State>((set, get) => {
       api.setCloseToTray(closeToTray).catch(fail);
     },
 
-    dismissError: () => set({ error: null, notice: null }),
+    dismissError: () => set({ error: null, notice: null, undo: null }),
+    dismissNotice: () => set({ notice: null, undo: null }),
+    undoChain: () => {
+      const u = get().undo;
+      if (!u) return;
+      replaceChain(u.chain, u.activePreset, u.presetBaseline);
+      say("Undone");
+    },
 
-    addFilter: (kind) => setChain([...get().chain, makeFilter(kind)]),
-    removeFilter: (id) => setChain(get().chain.filter((f) => f.id !== id)),
+    addFilter: (kind) => {
+      const prev = snapshot();
+      setChain([...prev.chain, makeFilter(kind)]);
+      say(`Added ${FILTERS[kind].label} as step ${prev.chain.length + 1}`, prev);
+    },
+    removeFilter: (id) => {
+      const prev = snapshot();
+      const gone = prev.chain.find((f) => f.id === id);
+      setChain(prev.chain.filter((f) => f.id !== id));
+      if (gone) say(`Removed ${FILTERS[gone.kind].label}`, prev);
+    },
     moveFilter: (from, to) => {
       const chain = [...get().chain];
       chain.splice(to, 0, chain.splice(from, 1)[0]);
@@ -284,22 +354,53 @@ export const useStore = create<State>((set, get) => {
     setParam: (id, key, value) =>
       setChain(get().chain.map((f) => (f.id === id ? { ...f, params: { ...f.params, [key]: value } } : f))),
 
+    toggleCollapsed: (id) => set((s) => ({ collapsed: { ...s.collapsed, [id]: !s.collapsed[id] } })),
+    setAllCollapsed: (on) => set((s) => ({ collapsed: Object.fromEntries(s.chain.map((f) => [f.id, on])) })),
+
     refreshPresets: async () => set({ presets: await api.listPresets() }),
     savePreset: async (name) => {
-      await api.savePreset(name, get().chain).catch(fail);
-      await get().refreshPresets();
+      const { chain } = get();
+      try {
+        await api.savePreset(name, chain);
+        set({ activePreset: name, presetBaseline: signature(chain) });
+        persist();
+        await get().refreshPresets();
+        say(`Saved “${name}”`);
+      } catch (e) {
+        fail(e);
+      }
+    },
+    saveActivePreset: async () => {
+      const name = get().activePreset;
+      if (name) await get().savePreset(name);
     },
     loadPreset: async (name) => {
       try {
-        const loaded = await api.loadPreset(name);
-        setChain(loaded.map((f) => ({ ...f, id: crypto.randomUUID() })));
+        const chain = normalizeChain(await api.loadPreset(name));
+        const prev = snapshot();
+        replaceChain(chain, name, signature(chain));
+        say(`Loaded “${name}”`, signature(prev.chain) === signature(chain) ? null : prev);
       } catch (e) {
         fail(e);
       }
     },
     deletePreset: async (name) => {
-      await api.deletePreset(name).catch(fail);
-      await get().refreshPresets();
+      try {
+        await api.deletePreset(name);
+        if (get().activePreset === name) {
+          set({ activePreset: null, presetBaseline: null });
+          persist();
+        }
+        await get().refreshPresets();
+        say(`Deleted “${name}”`);
+      } catch (e) {
+        fail(e);
+      }
+    },
+    resetChain: () => {
+      const prev = snapshot();
+      replaceChain(defaultChain(), null, null);
+      say("Reset to the default chain", prev);
     },
   };
 });

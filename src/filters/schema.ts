@@ -108,6 +108,20 @@ export const FILTERS: Record<FilterKind, FilterDef> = {
   },
 };
 
+/** One-liners for the "Add filter" menu. */
+export const FILTER_HINTS: Record<FilterKind, string> = {
+  denoise: "AI noise removal: RNNoise, or NVIDIA on RTX GPUs",
+  gate: "Silences the mic whenever you stop talking",
+  eq3: "Shape the tone with low, mid and high bands",
+  expander: "Turns down quiet background sound",
+  compressor: "Evens out loud and quiet speech",
+  upward: "Lifts quiet speech toward the threshold",
+  limiter: "A hard ceiling that stops clipping",
+  gain: "Raise or lower the overall volume",
+  polarity: "Flips the waveform; fixes phase problems",
+  delay: "Delays the mic, e.g. to sync with video",
+};
+
 export const defaultParams = (kind: FilterKind): Record<string, ParamValue> =>
   Object.fromEntries(FILTERS[kind].params.map((p) => [p.key, p.def]));
 
@@ -118,10 +132,15 @@ export const makeFilter = (kind: FilterKind, enabled = true): FilterCfg => ({
   params: defaultParams(kind),
 });
 
-export const defaultChain = (): FilterCfg[] => [
-  makeFilter("denoise"),
-  makeFilter("gate", false),
-  makeFilter("eq3", false),
-  makeFilter("compressor", false),
-  makeFilter("limiter"),
+/** The chain a fresh install starts with: the "Fifine" preset. */
+const FIFINE: [FilterKind, Record<string, ParamValue>][] = [
+  ["denoise", { method: "rnnoise", intensity: 1 }],
+  ["gain", { gain: 9.9 }],
+  ["eq3", { low: -2, mid: -14, high: -7.5 }],
+  ["expander", { ratio: 2, threshold: -30.5, attack_time: 10, release_time: 50, output_gain: 4.5 }],
+  ["compressor", { ratio: 3, threshold: -15, attack_time: 4, release_time: 100, output_gain: 0 }],
+  ["limiter", { threshold: -1.5, release_time: 60 }],
 ];
+
+export const defaultChain = (): FilterCfg[] =>
+  FIFINE.map(([kind, params]) => ({ ...makeFilter(kind), params: { ...defaultParams(kind), ...params } }));

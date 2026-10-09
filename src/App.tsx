@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore } from "./store";
-import { FILTERS, type FilterKind } from "./filters/schema";
+import { AddFilter } from "./components/AddFilter";
 import { FilterCard } from "./components/FilterCard";
 import { Meters } from "./components/Meters";
-import { PresetBar } from "./components/PresetBar";
-import { TitleBar } from "./components/TitleBar";
 import { NvidiaPrompt } from "./components/NvidiaPrompt";
+import { PresetMenu } from "./components/PresetMenu";
+import { TitleBar } from "./components/TitleBar";
+import { Toast } from "./components/Toast";
 
 export default function App() {
   const s = useStore();
@@ -19,6 +20,7 @@ export default function App() {
   }, []);
 
   const cableFound = s.devices?.outputs.some((d) => /CABLE Input/i.test(d.name));
+  const allFolded = s.chain.length > 0 && s.chain.every((f) => s.collapsed[f.id]);
 
   return (
     <>
@@ -29,11 +31,6 @@ export default function App() {
           {s.error && (
             <div className="banner error" onClick={s.dismissError}>
               {s.error}
-            </div>
-          )}
-          {s.notice && (
-            <div className="banner info" onClick={s.dismissError}>
-              {s.notice}
             </div>
           )}
           {s.devices && !cableFound && (
@@ -74,19 +71,16 @@ export default function App() {
             </button>
           </section>
 
-          <PresetBar />
-
-          <div className="section-head">
-            <span className="label">Signal chain · applied top to bottom</span>
-            <select value="" onChange={(e) => e.target.value && s.addFilter(e.target.value as FilterKind)}>
-              <option value="">+ Add filter</option>
-              {(Object.keys(FILTERS) as FilterKind[]).map((k) => (
-                <option key={k} value={k}>
-                  {FILTERS[k].label}
-                </option>
-              ))}
-            </select>
+          <div className="toolbar">
+            <PresetMenu />
+            <span className="spacer" />
+            <button className="ghost" onClick={() => s.setAllCollapsed(!allFolded)}>
+              {allFolded ? "Expand all" : "Collapse all"}
+            </button>
+            <AddFilter />
           </div>
+
+          <span className="label chain-label">Signal chain · applied top to bottom</span>
 
           <ol className="chain">
             <li className="terminal">Microphone in</li>
@@ -108,6 +102,7 @@ export default function App() {
         </div>
       </div>
       <footer className="footer">
+        <Toast />
         <Meters />
       </footer>
     </>
