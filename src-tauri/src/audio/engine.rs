@@ -122,7 +122,10 @@ fn build(app: &AppHandle, input: Option<&str>, output: Option<&str>) -> Result<I
 fn err_cb(app: &AppHandle) -> impl FnMut(cpal::Error) + Send + 'static {
     let app = app.clone();
     move |e| {
-        let _ = app.emit("engine-error", e.to_string());
+        // An xrun is a one-off glitch, not a dead stream, so don't tear the engine down for it.
+        if e.kind() != cpal::ErrorKind::Xrun {
+            let _ = app.emit("engine-error", e.to_string());
+        }
     }
 }
 

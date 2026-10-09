@@ -9,7 +9,7 @@ export function PresetBar() {
   return (
     <section className="presets">
       <select value={selected} onChange={(e) => setSelected(e.target.value)}>
-        <option value="">Presets…</option>
+        <option value="">Presets</option>
         {presets.map((p) => (
           <option key={p}>{p}</option>
         ))}
@@ -18,6 +18,7 @@ export function PresetBar() {
         Load
       </button>
       <button
+        className="ghost"
         disabled={!selected}
         onClick={() => {
           deletePreset(selected);
@@ -26,6 +27,7 @@ export function PresetBar() {
       >
         Delete
       </button>
+      <span className="spacer" />
       <input placeholder="New preset name" value={name} onChange={(e) => setName(e.target.value)} />
       <button
         disabled={!name.trim()}
@@ -34,7 +36,7 @@ export function PresetBar() {
           setName("");
         }}
       >
-        Save current
+        Save
       </button>
     </section>
   );
