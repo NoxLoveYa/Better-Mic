@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, type Devices, type Meter, type NvidiaStatus } from "./api";
+import { api, type Devices, type Meter, type NvidiaGpu, type NvidiaInstallProgress, type NvidiaStatus } from "./api";
 import { defaultChain, makeFilter, type FilterCfg, type FilterKind, type ParamValue } from "./filters/schema";
 
 const STORAGE_KEY = "better-mic";
@@ -11,10 +11,19 @@ interface Saved {
   closeToTray: boolean;
   /** Whether the "launch on startup" default has been applied once; after that the OS entry is the truth. */
   autostartDefaulted: boolean;
+  /** Set once the NVIDIA install popup was closed, so it doesn't reappear on every launch. */
+  nvidiaPromptDismissed: boolean;
 }
 
 const loadSaved = (): Saved => {
-  const fresh: Saved = { input: null, output: null, chain: defaultChain(), closeToTray: false, autostartDefaulted: false };
+  const fresh: Saved = {
+    input: null,
+    output: null,
+    chain: defaultChain(),
+    closeToTray: false,
+    autostartDefaulted: false,
+    nvidiaPromptDismissed: false,
+  };
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "");
     if (Array.isArray(s.chain)) return { ...fresh, ...s };
@@ -36,9 +45,16 @@ interface State extends Saved {
   installingCable: boolean;
   presets: string[];
   nvidia: NvidiaStatus | null;
+  gpu: NvidiaGpu | null;
+  nvidiaPrompt: boolean;
+  nvidiaInstall: NvidiaInstallProgress | null;
+  nvidiaError: string | null;
 
   init: () => Promise<void>;
   installCable: () => Promise<void>;
+  openNvidiaPrompt: () => void;
+  closeNvidiaPrompt: () => void;
+  installNvidia: () => Promise<void>;
   refreshDevices: () => Promise<void>;
   setInput: (id: string) => void;
   setOutput: (id: string) => void;
@@ -63,8 +79,11 @@ interface State extends Saved {
 
 export const useStore = create<State>((set, get) => {
   const persist = () => {
-    const { input, output, chain, closeToTray, autostartDefaulted } = get();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ input, output, chain, closeToTray, autostartDefaulted }));
+    const { input, output, chain, closeToTray, autostartDefaulted, nvidiaPromptDismissed } = get();
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ input, output, chain, closeToTray, autostartDefaulted, nvidiaPromptDismissed }),
+    );
   };
 
   const setChain = (chain: FilterCfg[]) => {
@@ -88,6 +107,38 @@ export const useStore = create<State>((set, get) => {
     installingCable: false,
     presets: [],
     nvidia: null,
+    gpu: null,
+    nvidiaPrompt: false,
+    nvidiaInstall: null,
+    nvidiaError: null,
+
+    openNvidiaPrompt: () => set({ nvidiaPrompt: true, nvidiaError: null }),
+    closeNvidiaPrompt: () => {
+      set({ nvidiaPrompt: false, nvidiaPromptDismissed: true });
+      persist();
+    },
+
+    installNvidia: async () => {
+      const { gpu } = get();
+      if (!gpu) return;
+      set({ nvidiaInstall: { stage: "download", done: 0, total: 0 }, nvidiaError: null });
+      try {
+        await api.installNvidiaSdk(gpu.arch);
+        const nvidia = await api.nvidiaStatus();
+        set({
+          nvidia,
+          nvidiaPrompt: !nvidia.available,
+          notice: nvidia.available
+            ? "NVIDIA noise removal installed. Pick it under Noise suppression → Method."
+            : null,
+          nvidiaError: nvidia.available ? null : "The installer finished, but the SDK still isn't found. Restart Better Mic and check again.",
+        });
+      } catch (e) {
+        set({ nvidiaError: String(e) });
+      } finally {
+        set({ nvidiaInstall: null });
+      }
+    },
 
     installCable: async () => {
       set({ installingCable: true, error: null, notice: null });
@@ -117,7 +168,18 @@ export const useStore = create<State>((set, get) => {
         api.setPreview(false).catch(() => {});
         set({ error, preview: false });
       });
-      await Promise.all([get().refreshDevices(), get().refreshPresets(), api.nvidiaStatus().then((nvidia) => set({ nvidia }))]).catch(fail);
+      await api.onNvidiaInstall((p) => get().nvidiaInstall && set({ nvidiaInstall: p }));
+      await Promise.all([
+        get().refreshDevices(),
+        get().refreshPresets(),
+        api.nvidiaStatus().then((nvidia) => set({ nvidia })),
+        api.nvidiaGpu().then((gpu) => set({ gpu })),
+      ]).catch(fail);
+      const { gpu, nvidia, nvidiaPromptDismissed } = get();
+      if (gpu && nvidia && !nvidia.available && !nvidiaPromptDismissed) set({ nvidiaPrompt: true });
+
+      // Re-check when returning to the window, so installing the NVIDIA SDK doesn't need an app restart.
+      window.addEventListener("focus", () => api.nvidiaStatus().then((nvidia) => set({ nvidia })).catch(() => {}));
 
       try {
         if (!get().autostartDefaulted) {

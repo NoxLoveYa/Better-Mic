@@ -5,7 +5,7 @@ mod nvidia;
 
 use serde::Deserialize;
 
-pub use nvidia::{probe as nvidia_probe, Status as NvidiaStatus};
+pub use nvidia::{detect_gpu as nvidia_gpu, installer_url as nvidia_installer_url, probe as nvidia_probe, Gpu as NvidiaGpu, Status as NvidiaStatus};
 
 pub const SR: f32 = 48000.0;
 pub const FRAME: usize = 480;

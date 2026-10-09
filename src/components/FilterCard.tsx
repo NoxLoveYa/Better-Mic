@@ -11,7 +11,7 @@ interface Props {
 }
 
 export function FilterCard({ filter, index, count, onDragStart, onDrop }: Props) {
-  const { toggleFilter, removeFilter, moveFilter, setParam, nvidia } = useStore();
+  const { toggleFilter, removeFilter, moveFilter, setParam, nvidia, gpu, openNvidiaPrompt } = useStore();
   const def = FILTERS[filter.kind];
 
   return (
@@ -60,7 +60,16 @@ export function FilterCard({ filter, index, count, onDragStart, onDrop }: Props)
                         </option>
                       ))}
                     </select>
-                    {filter.kind === "denoise" && value === "nvidia" && nvidia && <small>{nvidia.detail}</small>}
+                    {filter.kind === "denoise" && nvidia && (!nvidia.available || value === "nvidia") && (
+                      <small>
+                        {nvidia.detail}
+                        {gpu && !nvidia.available && (
+                          <button className="link" onClick={openNvidiaPrompt}>
+                            Install it now
+                          </button>
+                        )}
+                      </small>
+                    )}
                   </label>
                 );
               }

@@ -67,6 +67,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::list_devices,
             commands::nvidia_status,
+            commands::nvidia_gpu,
+            commands::install_nvidia_sdk,
             commands::install_vbcable,
             commands::get_autostart,
             commands::set_autostart,

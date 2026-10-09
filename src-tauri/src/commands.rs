@@ -90,6 +90,65 @@ pub fn nvidia_status() -> dsp::NvidiaStatus {
     dsp::nvidia_probe()
 }
 
+/// `nvidia-smi` can take a second or so, so keep it off the main thread.
+#[tauri::command]
+pub async fn nvidia_gpu() -> Option<dsp::NvidiaGpu> {
+    tauri::async_runtime::spawn_blocking(dsp::nvidia_gpu).await.ok().flatten()
+}
+
+#[derive(serde::Serialize, Clone)]
+struct InstallProgress {
+    stage: String,
+    done: u64,
+    total: u64,
+}
+
+const INSTALL_NVIDIA: &str = include_str!("install_nvidia.ps1");
+
+/// Downloads NVIDIA's Audio Effects redistributable for `arch`, checks its signature and runs it elevated.
+/// Progress is reported through `nvidia-install` events.
+#[tauri::command]
+pub async fn install_nvidia_sdk(app: AppHandle, arch: String) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use tauri::Emitter;
+
+    let url = dsp::nvidia_installer_url(&arch).ok_or("Unknown GPU generation.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &INSTALL_NVIDIA.replace("{URL}", &url)])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+
+        let emit = |stage: &str, done: u64, total: u64| {
+            let _ = app.emit("nvidia-install", InstallProgress { stage: stage.into(), done, total });
+        };
+        let mut error = None;
+        for line in BufReader::new(child.stdout.take().ok_or("no installer output")?).lines().map_while(Result::ok) {
+            match line.trim().split_once(' ') {
+                Some(("PROGRESS", rest)) => {
+                    let mut n = rest.split(' ').filter_map(|x| x.parse::<u64>().ok());
+                    emit("download", n.next().unwrap_or(0), n.next().unwrap_or(0));
+                }
+                Some(("STAGE", stage)) => emit(stage, 0, 0),
+                Some(("ERROR", msg)) => error = Some(msg.to_string()),
+                _ => {}
+            }
+        }
+        if child.wait().map_err(|e| e.to_string())?.success() {
+            Ok(())
+        } else {
+            Err(error.unwrap_or_else(|| "The NVIDIA installer failed.".into()))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn start_engine(
     app: AppHandle,

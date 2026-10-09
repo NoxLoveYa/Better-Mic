@@ -27,10 +27,25 @@ export interface NvidiaStatus {
   detail: string;
 }
 
+export interface NvidiaGpu {
+  name: string;
+  arch: "turing" | "ampere" | "ada" | "blackwell";
+}
+
+export interface NvidiaInstallProgress {
+  stage: "download" | "verify" | "install";
+  done: number;
+  total: number;
+}
+
 export const api = {
   listDevices: () => invoke<Devices>("list_devices"),
   installVbCable: () => invoke<void>("install_vbcable"),
   nvidiaStatus: () => invoke<NvidiaStatus>("nvidia_status"),
+  nvidiaGpu: () => invoke<NvidiaGpu | null>("nvidia_gpu"),
+  installNvidiaSdk: (arch: NvidiaGpu["arch"]) => invoke<void>("install_nvidia_sdk", { arch }),
+  onNvidiaInstall: (cb: (p: NvidiaInstallProgress) => void) =>
+    listen<NvidiaInstallProgress>("nvidia-install", (e) => cb(e.payload)),
   start: (input: string | null, output: string | null, chain: FilterCfg[]) =>
     invoke<void>("start_engine", { input, output, chain }),
   stop: () => invoke<void>("stop_engine"),

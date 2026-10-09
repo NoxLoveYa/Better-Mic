@@ -25,11 +25,9 @@ pub struct Status {
 }
 
 fn sdk_dirs() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(d) = std::env::var("NVAFX_SDK_DIR") {
-        v.push(PathBuf::from(d));
-    }
-    v.push(PathBuf::from(r"C:\Program Files\NVIDIA Corporation\NVIDIA Audio Effects SDK"));
+    let mut v: Vec<PathBuf> = ["NVAFX_SDK_DIR", "AFX_SDK_DIR"].iter().filter_map(|k| std::env::var(k).ok()).map(PathBuf::from).collect();
+    let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
+    v.push(PathBuf::from(pf).join(r"NVIDIA Corporation\NVIDIA Audio Effects SDK"));
     v
 }
 
@@ -51,13 +49,63 @@ fn find() -> Option<(PathBuf, Vec<PathBuf>)> {
 }
 
 pub fn probe() -> Status {
-    match find() {
-        Some((d, _)) => Status { available: true, detail: format!("SDK found at {}", d.display()) },
-        None => Status {
-            available: false,
-            detail: "NVIDIA Audio Effects SDK (denoiser 48k model) not found. Install it or set NVAFX_SDK_DIR.".into(),
-        },
+    if let Some((d, _)) = find() {
+        return Status { available: true, detail: format!("SDK found at {}", d.display()) };
     }
+    let detail = match sdk_dirs().into_iter().find(|d| d.is_dir()) {
+        Some(d) => format!(
+            "Found {} but NVAudioEffects.dll or models\\denoiser_48k.trtpkg is missing. Reinstall the NVIDIA Audio Effects redistributable for your GPU.",
+            d.display()
+        ),
+        None => "NVIDIA Audio Effects SDK is not installed (NVIDIA Broadcast doesn't include it). Install the \"Audio Effects\" redistributable for your GPU generation, the same one OBS uses: nvidia.com/en-us/geforce/broadcasting/broadcast-sdk/resources".into(),
+    };
+    Status { available: false, detail }
+}
+
+#[derive(Serialize)]
+pub struct Gpu {
+    pub name: String,
+    /// Which redistributable build fits this GPU: turing, ampere, ada or blackwell.
+    pub arch: &'static str,
+}
+
+fn arch_for(compute_cap: &str) -> Option<&'static str> {
+    let (major, minor) = compute_cap.trim().split_once('.')?;
+    match (major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?) {
+        (7, 5) => Some("turing"),
+        (8, 9) => Some("ada"),
+        (8, _) => Some("ampere"),
+        (10 | 12, _) => Some("blackwell"),
+        _ => None,
+    }
+}
+
+/// First installed NVIDIA GPU with tensor cores that the Audio Effects SDK supports (RTX 20 series and newer).
+pub fn detect_gpu() -> Option<Gpu> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=name,compute_cap", "--format=csv,noheader"])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
+        let (name, cap) = l.rsplit_once(',')?;
+        Some(Gpu { name: name.trim().into(), arch: arch_for(cap)? })
+    })
+}
+
+/// NVIDIA's own download for the Audio Effects redistributable (the build OBS uses).
+pub fn installer_url(arch: &str) -> Option<String> {
+    let build = match arch {
+        "turing" => "Turing",
+        "ampere" => "Ampere",
+        "ada" => "Ada",
+        "blackwell" => "Blackwell",
+        _ => return None,
+    };
+    Some(format!(
+        "https://international.download.nvidia.com/Windows/broadcast/sdk/AFX/2025-01-21_NVIDIA_AFX_SDK_Win_v1.6.1.2-GA_{build}.exe"
+    ))
 }
 
 pub struct Nvidia {
@@ -138,5 +186,34 @@ impl Nvidia {
 impl Drop for Nvidia {
     fn drop(&mut self) {
         unsafe { (self.destroy)(self.h) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs against the real SDK; skipped on machines where it isn't installed.
+    #[test]
+    fn real_sdk_loads_and_processes() {
+        if !probe().available {
+            eprintln!("skipped: NVIDIA Audio Effects SDK not installed");
+            return;
+        }
+        let t = std::time::Instant::now();
+        let mut nv = Nvidia::open(1.0).expect("open");
+        eprintln!("model load took {:?}", t.elapsed());
+
+        let (mut input, mut output) = ([0f32; FRAME], [0f32; FRAME]);
+        let t = std::time::Instant::now();
+        for f in 0..200 {
+            for (i, s) in input.iter_mut().enumerate() {
+                *s = 0.3 * (2.0 * std::f32::consts::PI * 220.0 * (f * FRAME + i) as f32 / 48000.0).sin();
+            }
+            assert!(nv.process(&input, &mut output), "NvAFX_Run failed on frame {f}");
+            assert!(output.iter().all(|s| s.is_finite()));
+        }
+        eprintln!("200 frames (2 s of audio) processed in {:?}", t.elapsed());
+        nv.set_intensity(0.5);
     }
 }

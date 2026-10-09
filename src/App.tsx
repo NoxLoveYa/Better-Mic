@@ -5,6 +5,7 @@ import { FilterCard } from "./components/FilterCard";
 import { Meters } from "./components/Meters";
 import { PresetBar } from "./components/PresetBar";
 import { TitleBar } from "./components/TitleBar";
+import { NvidiaPrompt } from "./components/NvidiaPrompt";
 
 export default function App() {
   const s = useStore();
@@ -22,6 +23,7 @@ export default function App() {
   return (
     <>
       <TitleBar />
+      <NvidiaPrompt />
       <div className="scroll">
         <div className="app">
           {s.error && (
@@ -72,7 +74,6 @@ export default function App() {
             </button>
           </section>
 
-          <Meters />
           <PresetBar />
 
           <div className="section-head">
@@ -106,6 +107,9 @@ export default function App() {
           </ol>
         </div>
       </div>
+      <footer className="footer">
+        <Meters />
+      </footer>
     </>
   );
 }
