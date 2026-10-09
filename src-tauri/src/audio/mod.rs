@@ -36,6 +36,10 @@ pub fn list_devices() -> Result<Devices, String> {
     })
 }
 
+pub fn default_output_id() -> Option<String> {
+    cpal::default_host().default_output_device().as_ref().and_then(info).map(|d| d.id)
+}
+
 pub fn find_device(id: Option<&str>, input: bool) -> Result<Device, String> {
     let host = cpal::default_host();
     let dev = match id {

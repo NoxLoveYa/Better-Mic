@@ -4,11 +4,44 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_autostart::ManagerExt;
+
+/// Passed to the app by the Windows startup entry, so a login launch can be told apart from a manual one.
+pub const AUTOSTART_ARG: &str = "--autostarted";
 
 #[derive(Default)]
 pub struct AppState {
     engine: Mutex<Option<EngineHandle>>,
     mute: Arc<AtomicBool>,
+    pub close_to_tray: AtomicBool,
+}
+
+#[tauri::command]
+pub fn get_autostart(app: AppHandle) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, on: bool) -> Result<(), String> {
+    let launcher = app.autolaunch();
+    let res = if on {
+        launcher.enable()
+    } else if launcher.is_enabled().unwrap_or(false) {
+        launcher.disable()
+    } else {
+        Ok(())
+    };
+    res.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn launched_at_startup() -> bool {
+    std::env::args().any(|a| a == AUTOSTART_ARG)
+}
+
+#[tauri::command]
+pub fn set_close_to_tray(state: State<AppState>, on: bool) {
+    state.close_to_tray.store(on, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -77,6 +110,15 @@ pub fn start_engine(
 pub fn stop_engine(state: State<AppState>) {
     if let Some(e) = state.engine.lock().unwrap().take() {
         e.stop();
+    }
+}
+
+#[tauri::command]
+pub fn set_preview(state: State<AppState>, on: bool) -> Result<(), String> {
+    match state.engine.lock().unwrap().as_ref() {
+        Some(e) => e.set_preview(on),
+        None if on => Err("Start the engine first.".into()),
+        None => Ok(()),
     }
 }
 

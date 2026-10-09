@@ -35,6 +35,11 @@ export const api = {
     invoke<void>("start_engine", { input, output, chain }),
   stop: () => invoke<void>("stop_engine"),
   setChain: (chain: FilterCfg[]) => invoke<void>("set_chain", { chain }),
+  getAutostart: () => invoke<boolean>("get_autostart"),
+  setAutostart: (on: boolean) => invoke<void>("set_autostart", { on }),
+  launchedAtStartup: () => invoke<boolean>("launched_at_startup"),
+  setCloseToTray: (on: boolean) => invoke<void>("set_close_to_tray", { on }),
+  setPreview: (on: boolean) => invoke<void>("set_preview", { on }),
   setMute: (mute: boolean) => invoke<void>("set_mute", { mute }),
   listPresets: () => invoke<string[]>("list_presets"),
   savePreset: (name: string, chain: FilterCfg[]) => invoke<void>("save_preset", { name, chain }),
@@ -42,4 +47,5 @@ export const api = {
   deletePreset: (name: string) => invoke<void>("delete_preset", { name }),
   onMeter: (cb: (m: Meter) => void) => listen<Meter>("meter", (e) => cb(e.payload)),
   onError: (cb: (msg: string) => void) => listen<string>("engine-error", (e) => cb(e.payload)),
+  onPreviewError: (cb: (msg: string) => void) => listen<string>("preview-error", (e) => cb(e.payload)),
 };

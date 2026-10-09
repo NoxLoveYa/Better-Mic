@@ -8,21 +8,27 @@ interface Saved {
   input: string | null;
   output: string | null;
   chain: FilterCfg[];
+  closeToTray: boolean;
+  /** Whether the "launch on startup" default has been applied once; after that the OS entry is the truth. */
+  autostartDefaulted: boolean;
 }
 
 const loadSaved = (): Saved => {
+  const fresh: Saved = { input: null, output: null, chain: defaultChain(), closeToTray: false, autostartDefaulted: false };
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "");
-    if (Array.isArray(s.chain)) return s;
+    if (Array.isArray(s.chain)) return { ...fresh, ...s };
   } catch {
     /* first run or corrupt data */
   }
-  return { input: null, output: null, chain: defaultChain() };
+  return fresh;
 };
 
 interface State extends Saved {
+  autostart: boolean;
   devices: Devices | null;
   running: boolean;
+  preview: boolean;
   muted: boolean;
   meter: Meter | null;
   error: string | null;
@@ -37,7 +43,10 @@ interface State extends Saved {
   setInput: (id: string) => void;
   setOutput: (id: string) => void;
   toggleRun: () => Promise<void>;
+  togglePreview: () => Promise<void>;
   toggleMute: () => void;
+  setAutostart: (on: boolean) => Promise<void>;
+  setCloseToTray: (on: boolean) => void;
   dismissError: () => void;
 
   addFilter: (kind: FilterKind) => void;
@@ -54,8 +63,8 @@ interface State extends Saved {
 
 export const useStore = create<State>((set, get) => {
   const persist = () => {
-    const { input, output, chain } = get();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ input, output, chain }));
+    const { input, output, chain, closeToTray, autostartDefaulted } = get();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ input, output, chain, closeToTray, autostartDefaulted }));
   };
 
   const setChain = (chain: FilterCfg[]) => {
@@ -68,8 +77,10 @@ export const useStore = create<State>((set, get) => {
 
   return {
     ...loadSaved(),
+    autostart: false,
     devices: null,
     running: false,
+    preview: false,
     muted: false,
     meter: null,
     error: null,
@@ -100,9 +111,34 @@ export const useStore = create<State>((set, get) => {
       await api.onMeter((meter) => set({ meter }));
       await api.onError((error) => {
         api.stop().catch(() => {});
-        set({ error, running: false, meter: null });
+        set({ error, running: false, preview: false, meter: null });
+      });
+      await api.onPreviewError((error) => {
+        api.setPreview(false).catch(() => {});
+        set({ error, preview: false });
       });
       await Promise.all([get().refreshDevices(), get().refreshPresets(), api.nvidiaStatus().then((nvidia) => set({ nvidia }))]).catch(fail);
+
+      try {
+        if (!get().autostartDefaulted) {
+          await api.setAutostart(true);
+          set({ autostartDefaulted: true });
+          persist();
+        }
+        set({ autostart: await api.getAutostart() });
+        await api.setCloseToTray(get().closeToTray);
+      } catch (e) {
+        fail(e);
+      }
+
+      if (await api.launchedAtStartup().catch(() => false)) {
+        // Right after login the virtual cable may not be up yet, so keep trying for a while.
+        for (let i = 0; i < 10 && !get().running; i++) {
+          await get().refreshDevices().catch(() => {});
+          await get().toggleRun();
+          if (!get().running) await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
     },
 
     refreshDevices: async () => {
@@ -132,7 +168,7 @@ export const useStore = create<State>((set, get) => {
       try {
         if (running) {
           await api.stop();
-          set({ running: false, meter: null });
+          set({ running: false, preview: false, meter: null });
         } else {
           await api.start(input, output, chain);
           set({ running: true, error: null });
@@ -142,10 +178,35 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
+    togglePreview: async () => {
+      const preview = !get().preview;
+      try {
+        await api.setPreview(preview);
+        set({ preview });
+      } catch (e) {
+        fail(e);
+      }
+    },
+
     toggleMute: () => {
       const muted = !get().muted;
       set({ muted });
       api.setMute(muted).catch(fail);
+    },
+
+    setAutostart: async (on) => {
+      try {
+        await api.setAutostart(on);
+        set({ autostart: on });
+      } catch (e) {
+        fail(e);
+      }
+    },
+
+    setCloseToTray: (closeToTray) => {
+      set({ closeToTray });
+      persist();
+      api.setCloseToTray(closeToTray).catch(fail);
     },
 
     dismissError: () => set({ error: null, notice: null }),

@@ -64,7 +64,26 @@ body {
 .dot.live { background: var(--accent); box-shadow: var(--glow), 0 0 4px var(--accent); }
 .live-text { color: var(--accent); }
 .titlebar .actions { display: flex; gap: 8px; }
-.titlebar .actions button { height: 28px; }
+.titlebar .actions > button, .settings > button { height: 28px; }
+.titlebar { position: relative; z-index: 10; }
+
+.settings { position: relative; }
+.menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 320px;
+  padding: 4px;
+  background: #11151b;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 18px -8px rgba(46, 230, 214, 0.35);
+}
+.menu .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 12px; border-radius: 2px; cursor: pointer; }
+.menu .row:hover { background: rgba(255, 255, 255, 0.04); }
+.menu .row span { display: flex; flex-direction: column; gap: 2px; }
+.menu .row b { font-weight: 500; }
+.menu .row small { color: var(--faint); font-size: 11px; }
 
 .wc { display: flex; align-self: stretch; margin-left: 4px; }
 .wc button {
@@ -102,6 +121,7 @@ button.primary { color: #041311; background: var(--accent); border-color: var(--
 button.primary:hover:not(:disabled) { box-shadow: 0 0 22px rgba(46, 230, 214, 0.5); border-color: var(--accent); }
 button.danger { color: var(--danger); background: rgba(255, 92, 108, 0.1); border-color: rgba(255, 92, 108, 0.5); }
 button.danger:hover:not(:disabled) { border-color: var(--danger); box-shadow: 0 0 14px rgba(255, 92, 108, 0.25); }
+button.toggled { color: var(--accent); border-color: rgba(46, 230, 214, 0.55); background: var(--accent-soft); box-shadow: 0 0 10px rgba(46, 230, 214, 0.2); }
 button.active { color: var(--warn); border-color: rgba(255, 184, 77, 0.55); background: rgba(255, 184, 77, 0.08); }
 button.ghost { border-color: transparent; color: var(--dim); padding: 0 8px; }
 button.ghost:hover:not(:disabled) { color: var(--text); box-shadow: none; border-color: var(--line-strong); }

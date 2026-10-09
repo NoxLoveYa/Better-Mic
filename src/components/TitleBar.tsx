@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useStore } from "../store";
 
@@ -10,8 +10,62 @@ const Icon = ({ d }: { d: string }) => (
   </svg>
 );
 
+function Setting({ title, hint, on, onToggle }: { title: string; hint: string; on: boolean; onToggle: () => void }) {
+  return (
+    <div className="row" onClick={onToggle}>
+      <span>
+        <b>{title}</b>
+        <small>{hint}</small>
+      </span>
+      <button role="switch" aria-checked={on} aria-label={title} className="switch" />
+    </div>
+  );
+}
+
+function Settings() {
+  const { autostart, closeToTray, setAutostart, setCloseToTray } = useStore();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+
+  return (
+    <div className="settings" ref={ref}>
+      <button className={open ? "toggled" : ""} aria-expanded={open} onClick={() => setOpen(!open)}>
+        Settings
+      </button>
+      {open && (
+        <div className="menu">
+          <Setting
+            title="Launch on Windows startup"
+            hint="Starts in the tray and begins processing automatically."
+            on={autostart}
+            onToggle={() => setAutostart(!autostart)}
+          />
+          <Setting
+            title="Minimize to tray when closed"
+            hint="Closing the window keeps the mic running. Quit from the tray icon."
+            on={closeToTray}
+            onToggle={() => setCloseToTray(!closeToTray)}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function TitleBar() {
-  const { running, muted, toggleRun, toggleMute } = useStore();
+  const { running, preview, muted, togglePreview, toggleRun, toggleMute } = useStore();
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -31,12 +85,21 @@ export function TitleBar() {
         <span className={`status${running ? " live-text" : ""}`}>{running ? "Live" : "Idle"}</span>
       </div>
       <div className="actions">
+        <button
+          className={preview ? "toggled" : ""}
+          disabled={!running}
+          onClick={togglePreview}
+          title="Play the processed mic on the Windows default output. Use headphones to avoid feedback."
+        >
+          {preview ? "Previewing" : "Preview"}
+        </button>
         <button className={muted ? "active" : ""} onClick={toggleMute}>
           {muted ? "Muted" : "Mute"}
         </button>
         <button className={running ? "danger" : "primary"} onClick={toggleRun}>
           {running ? "Stop" : "Start"}
         </button>
+        <Settings />
       </div>
       <div className="wc">
         <button aria-label="Minimize" onClick={() => win.minimize()}>

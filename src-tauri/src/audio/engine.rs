@@ -1,8 +1,9 @@
-//! Mic capture -> DSP chain -> virtual cable. cpal streams are `!Send`, so everything lives on one
-//! dedicated thread; the audio callbacks only move samples through lock-free ring buffers.
+//! Mic capture -> DSP chain -> virtual cable (and optionally the default speakers for preview).
+//! cpal streams are `!Send`, so everything lives on one dedicated thread; the audio callbacks only
+//! move samples through lock-free ring buffers.
 
-use super::find_device;
 use super::resample::Resampler;
+use super::{default_output_id, find_device};
 use crate::dsp::{lin_to_db, Chain, FilterCfg, FRAME, SR};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Device, FromSample, SampleFormat, SizedSample, Stream, StreamConfig};
@@ -18,6 +19,7 @@ const TARGET_BUFFER_MS: f32 = 20.0;
 
 pub enum Msg {
     Chain(Vec<FilterCfg>),
+    Preview(bool, mpsc::SyncSender<Result<(), String>>),
     Stop,
 }
 
@@ -31,6 +33,13 @@ impl EngineHandle {
     pub fn send(&self, m: Msg) {
         let _ = self.tx.send(m);
         self.thread.unpark();
+    }
+
+    /// Starts or stops playing the processed signal on the Windows default output.
+    pub fn set_preview(&self, on: bool) -> Result<(), String> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.send(Msg::Preview(on, tx));
+        rx.recv_timeout(Duration::from_secs(3)).map_err(|_| "audio thread not responding".to_string())?
     }
 
     pub fn stop(mut self) {
@@ -50,14 +59,71 @@ struct MeterPayload {
     buffered_ms: f32,
 }
 
+/// An output device fed with 48 kHz frames. Resamples to the device rate and trims the rate slightly
+/// to hold the buffer at its target fill despite clock drift.
+struct Sink {
+    stream: Stream,
+    prod: Producer<f32>,
+    cap: usize,
+    rate: u32,
+    rs: Resampler,
+    base_step: f64,
+    target_fill: f32,
+    fill_avg: f32,
+    id: Option<String>,
+}
+
+impl Sink {
+    fn open(app: &AppHandle, id: Option<&str>, err_event: &'static str) -> Result<Self, String> {
+        let dev = find_device(id, false)?;
+        let sup = dev.default_output_config().map_err(|e| e.to_string())?;
+        let rate = sup.sample_rate();
+        let cap = rate as usize / 2;
+        let (mut prod, cons) = RingBuffer::<f32>::new(cap);
+        let err = err_cb(app, err_event);
+        let stream = match sup.sample_format() {
+            SampleFormat::F32 => build_output::<f32>(&dev, sup.clone().into(), cons, err),
+            SampleFormat::I16 => build_output::<i16>(&dev, sup.clone().into(), cons, err),
+            SampleFormat::I32 => build_output::<i32>(&dev, sup.clone().into(), cons, err),
+            f => Err(format!("unsupported output sample format {f}")),
+        }?;
+
+        let target_fill = rate as f32 * TARGET_BUFFER_MS / 1000.0;
+        // Pre-fill with silence so the output callback doesn't underrun while the first frames are processed.
+        for _ in 0..target_fill as usize {
+            let _ = prod.push(0.0);
+        }
+        let rs = Resampler::new(SR as f64, rate as f64);
+        let base_step = rs.step;
+        let id = dev.id().ok().map(|i| i.to_string());
+        Ok(Self { stream, prod, cap, rate, rs, base_step, target_fill, fill_avg: target_fill, id })
+    }
+
+    fn play(&self) -> Result<(), String> {
+        self.stream.play().map_err(|e| e.to_string())
+    }
+
+    fn push(&mut self, frame: &[f32]) {
+        let fill = (self.cap - self.prod.slots()) as f32;
+        self.fill_avg += (fill - self.fill_avg) * 0.02;
+        let err = ((self.fill_avg - self.target_fill) / self.target_fill).clamp(-1.0, 1.0) as f64;
+        self.rs.step = self.base_step * (1.0 + 0.005 * err);
+        let prod = &mut self.prod;
+        self.rs.push(frame, |s| {
+            let _ = prod.push(s);
+        });
+    }
+
+    fn buffered_ms(&self) -> f32 {
+        self.fill_avg / self.rate as f32 * 1000.0 + 1000.0 * FRAME as f32 / SR
+    }
+}
+
 struct Io {
     _input: Stream,
-    _output: Stream,
     in_cons: Consumer<f32>,
-    out_prod: Producer<f32>,
     in_rate: u32,
-    out_rate: u32,
-    out_cap: usize,
+    out: Sink,
 }
 
 pub fn start(
@@ -84,47 +150,41 @@ pub fn start(
 
 fn build(app: &AppHandle, input: Option<&str>, output: Option<&str>) -> Result<Io, String> {
     let in_dev = find_device(input, true)?;
-    let out_dev = find_device(output, false)?;
     let in_sup = in_dev.default_input_config().map_err(|e| e.to_string())?;
-    let out_sup = out_dev.default_output_config().map_err(|e| e.to_string())?;
-    let (in_rate, out_rate) = (in_sup.sample_rate(), out_sup.sample_rate());
-
+    let in_rate = in_sup.sample_rate();
     let (in_prod, in_cons) = RingBuffer::<f32>::new(in_rate as usize / 2);
-    let out_cap = out_rate as usize / 2;
-    let (out_prod, out_cons) = RingBuffer::<f32>::new(out_cap);
 
     let wake = thread::current();
-    let err_in = err_cb(app);
-    let err_out = err_cb(app);
+    let err_in = err_cb(app, "engine-error");
     let input_stream = match in_sup.sample_format() {
         SampleFormat::F32 => build_input::<f32>(&in_dev, in_sup.clone().into(), in_prod, wake, err_in),
         SampleFormat::I16 => build_input::<i16>(&in_dev, in_sup.clone().into(), in_prod, wake, err_in),
         SampleFormat::I32 => build_input::<i32>(&in_dev, in_sup.clone().into(), in_prod, wake, err_in),
         f => Err(format!("unsupported input sample format {f}")),
     }?;
-    let output_stream = match out_sup.sample_format() {
-        SampleFormat::F32 => build_output::<f32>(&out_dev, out_sup.clone().into(), out_cons, err_out),
-        SampleFormat::I16 => build_output::<i16>(&out_dev, out_sup.clone().into(), out_cons, err_out),
-        SampleFormat::I32 => build_output::<i32>(&out_dev, out_sup.clone().into(), out_cons, err_out),
-        f => Err(format!("unsupported output sample format {f}")),
-    }?;
+    let out = Sink::open(app, output, "engine-error")?;
 
-    let mut io = Io { _input: input_stream, _output: output_stream, in_cons, out_prod, in_rate, out_rate, out_cap };
-    // Pre-fill with silence so the output callback doesn't underrun while the first frames are processed.
-    for _ in 0..(out_rate as f32 * TARGET_BUFFER_MS / 1000.0) as usize {
-        let _ = io.out_prod.push(0.0);
-    }
-    io._output.play().map_err(|e| e.to_string())?;
-    io._input.play().map_err(|e| e.to_string())?;
-    Ok(io)
+    out.play()?;
+    input_stream.play().map_err(|e| e.to_string())?;
+    Ok(Io { _input: input_stream, in_cons, in_rate, out })
 }
 
-fn err_cb(app: &AppHandle) -> impl FnMut(cpal::Error) + Send + 'static {
+fn open_preview(app: &AppHandle, cable_id: Option<&str>) -> Result<Sink, String> {
+    let default = default_output_id();
+    if default.is_some() && default.as_deref() == cable_id {
+        return Err("The Windows default output is the virtual cable itself. Set your speakers or headphones as the default output to preview.".into());
+    }
+    let sink = Sink::open(app, None, "preview-error")?;
+    sink.play()?;
+    Ok(sink)
+}
+
+fn err_cb(app: &AppHandle, event: &'static str) -> impl FnMut(cpal::Error) + Send + 'static {
     let app = app.clone();
     move |e| {
-        // An xrun is a one-off glitch, not a dead stream, so don't tear the engine down for it.
+        // An xrun is a one-off glitch, not a dead stream, so don't tear anything down for it.
         if e.kind() != cpal::ErrorKind::Xrun {
-            let _ = app.emit("engine-error", e.to_string());
+            let _ = app.emit(event, e.to_string());
         }
     }
 }
@@ -207,10 +267,7 @@ fn run(app: AppHandle, mut io: Io, cfg: Vec<FilterCfg>, rx: mpsc::Receiver<Msg>,
     chain.apply(cfg);
 
     let mut in_rs = (io.in_rate != SR as u32).then(|| Resampler::new(io.in_rate as f64, SR as f64));
-    let mut out_rs = Resampler::new(SR as f64, io.out_rate as f64);
-    let base_step = out_rs.step;
-    let target_fill = io.out_rate as f32 * TARGET_BUFFER_MS / 1000.0;
-    let mut fill_avg = target_fill;
+    let mut preview: Option<Sink> = None;
 
     let (mut raw, mut acc) = (Vec::<f32>::new(), Vec::<f32>::new());
     let mut frame = [0f32; FRAME];
@@ -221,6 +278,17 @@ fn run(app: AppHandle, mut io: Io, cfg: Vec<FilterCfg>, rx: mpsc::Receiver<Msg>,
         while let Ok(m) = rx.try_recv() {
             match m {
                 Msg::Chain(c) => chain.apply(c),
+                Msg::Preview(on, reply) => {
+                    preview = None;
+                    let res = if on {
+                        open_preview(&app, io.out.id.as_deref()).map(|s| {
+                            preview = Some(s);
+                        })
+                    } else {
+                        Ok(())
+                    };
+                    let _ = reply.send(res);
+                }
                 Msg::Stop => return,
             }
         }
@@ -246,14 +314,10 @@ fn run(app: AppHandle, mut io: Io, cfg: Vec<FilterCfg>, rx: mpsc::Receiver<Msg>,
             }
             lout.add(&frame);
 
-            // Nudge the output resampler to hold the buffer at its target fill despite clock drift.
-            let fill = (io.out_cap - io.out_prod.slots()) as f32;
-            fill_avg += (fill - fill_avg) * 0.02;
-            let err = ((fill_avg - target_fill) / target_fill).clamp(-1.0, 1.0) as f64;
-            out_rs.step = base_step * (1.0 + 0.005 * err);
-            out_rs.push(&frame, |s| {
-                let _ = io.out_prod.push(s);
-            });
+            io.out.push(&frame);
+            if let Some(p) = preview.as_mut() {
+                p.push(&frame);
+            }
         }
         acc.drain(..off);
 
@@ -261,7 +325,7 @@ fn run(app: AppHandle, mut io: Io, cfg: Vec<FilterCfg>, rx: mpsc::Receiver<Msg>,
             last_emit = Instant::now();
             let (in_peak, in_rms) = lin.take();
             let (out_peak, out_rms) = lout.take();
-            let buffered_ms = fill_avg / io.out_rate as f32 * 1000.0 + 1000.0 * FRAME as f32 / SR;
+            let buffered_ms = io.out.buffered_ms();
             let _ = app.emit("meter", MeterPayload { in_peak, in_rms, out_peak, out_rms, buffered_ms });
         }
 
